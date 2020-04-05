@@ -1,0 +1,336 @@
+---
+title: "Sales"
+author: "SA"
+date: "4/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+The goal of this model is to predict sales of all the 600 courses of the ____ company for the next 60 days. For each course, data on sales, short/long promotions, holidays and a competition metric that defines the strength of the competition is given. These explanatory variables may or may not have an impact on the sales during the given period of more than 2 years. 
+
+1. Import the necessary libraries
+```{r}
+
+#Packages for general workthrough and data visualization
+library(ggplot2)
+library(tidyverse) 
+
+#Additional libraries for the Forecast library
+library(Rcpp)
+library(rlang)
+
+#Forecasting libraries
+library(prophet)
+library(forecast)
+library(tseries)
+
+#for reading times
+library(lubridate)
+
+#Measuring error
+require("Metrics")
+```
+
+2. Import the dataset
+```{r}
+train <- read.csv("train.csv")
+test <- read.csv ("test.csv")
+
+```
+
+3. Data exploration 
+
+```{r}
+#How many rows or columns are there in the dataset?
+dim(train)
+
+#How is the data organised?
+head(train,10)
+
+#In which format is each column stored? and is it correct?
+str(train)
+```
+
+b) 
+```{r}
+#Check for data summary of each column + NA values.
+summary(train)
+
+```
+
+Average sale distributed for the 600 courses, meaning how much was the average sale of each course?
+```{r}
+
+t<-train %>% group_by(Course_ID) %>% summarize(mean(Sales))
+
+hist(t$`mean(Sales)`, main = "Average Sales Distribution of the 600 Courses", xlab = "Average sales over the given period", ylab = "Number of courses")
+
+# About 83% the courses made revenue below 200. 
+```
+Course are divided into four domains - Business, Development, Finance and Accounting and Software marketing, with most courses being in the Development and the Software Marketing domain. Could this impact the sales of the courses? Possibly. May be courses in the software marketing or finance are more popular and see a higher user traffic versus the other two domains. 
+
+
+```{r}
+#Was there any impact of user traffic on sales? Promotions? public holidays
+
+#Normalize the sales and user_traffic columns for the forecasts
+train_normalize <- train[,c(1,2,3,6,7,8,9,11)]
+
+normalize <- function(x) {
+return ((x - min(x)) / (max(x) - min(x)))
+}
+
+columns_vect <- c("Sales", "Long_Promotion" , "Short_Promotion", "Public_Holiday", "User_Traffic")
+
+train_normalize[columns_vect] <- sapply(train_normalize[columns_vect], normalize)
+
+
+#With Sales~ User_traffic
+ggplot(train, aes(y = Sales, x = User_Traffic)) +
+  geom_point() + 
+  geom_smooth(method = "lm")
+
+#Correlation between sales and user_traffic is 0.82
+cor(train$Sales, train$User_Traffic)
+
+
+```
+
+Find correlation between the variables - factors like promotion, user traffic have a linear relationship with the sales as seen abov, while competition metric has a very weak correlation with sales. 
+```{r}
+#install.packages("corrplot")
+source("http://www.sthda.com/upload/rquery_cormat.r")
+
+library(corrplot)
+
+rquery.cormat(train_normalize, type = "full")
+
+```
+How significant are the relationships between sales and the given explanatory variables?
+So, promotion - short and long, user traffic and public holiday all are significant explanatory variables for the model. Together they explain 73% variation in the sales. Excluding public holiday doesnt alter the explanatory power of the model below, which shows it doesnt add much to the model. But, removing user traffic brings down the R Square to 16%, showing the importance of this variable in explaining variation in sales. 
+
+All the regression coefficients are positive, except for Public Holiday, showing that a unit increase in these explanatory variables, helps explain a unit increase in the Sales. And for public holiday the coefficient is understandably negative, given the sales are expected to go up on a holiday(also seen in visualization above).
+
+```{r}
+
+#For the total course sales of company
+linear_mod <- lm(Sales ~ Short_Promotion + Long_Promotion + User_Traffic + Public_Holiday, data = train_normalize)
+summary(linear_mod)
+
+```
+After the exploratory analysis, it's time to find if the series to be forecasted is stationary, in this case, sales. It'll most likely be not as the sales are expected to increase over time, so there will be a trend aspect to it and that could also mean increase in moving average as well. 
+
+
+```{r}
+#Checking for stationarity
+
+#plotting sales over time
+ggplot(train, aes(x = Day_No, y = Sales)) +
+  geom_line()
+
+#Augmented Dicky fuller test - the null hypothesis in this test is that series is non-stationary, so if the p-value is not significant then, null hypothesis will be true, and not otherwise.
+
+adf.test(train$Sales, alternative = "stationary", k = 0) 
+
+#P-value is significant at 0.01, hence the Sales series is stationary and can be used in the model as is.
+```
+
+
+```{r}
+# In Step 1, foreacasts will be made for a course and then the model will be applied to predict for the next 599 courses.
+
+
+course_1 <- train %>% filter(Course_ID==1)
+
+```
+
+Model 1 - Simple seasonal forecasts methods - werent able to predict the seasonality in the sales
+```{r}
+ts <- ts(course_1$Sales)
+autoplot(ts) +
+  autolayer(meanf(ts, h=100),
+    series="Mean", PI=FALSE) +
+  autolayer(naive(ts, h=100),
+    series="Naïve", PI=FALSE) +
+  autolayer(snaive(ts, h=100),
+    series="Seasonal naïve", PI=FALSE) +
+  ggtitle("Forecasts for future Course Sales") +
+  xlab("Year") + ylab("Sales") +
+  guides(colour=guide_legend(title="Forecast"))
+
+
+```
+
+Model2 - Neural Nets
+```{r}
+
+#Foreacasting Sales with neural nets
+fit <- nnetar(course_1$Sales, lambda=0, xreg = as.matrix(course_1$Short_Promotion, course_1$User_Traffic))
+
+course_test <- test %>% filter(Course_ID == 1)
+
+autoplot(forecast(fit,xreg = as.matrix(course_test$Short_Promotion, course_1$User_Traffic[60])))
+
+plot(fit$residuals)
+
+rmsle(ts, !is.na(fit$fitted))
+
+```
+
+Model - 3. ARIMA
+
+```{r}
+acf(log(course_1$Sales))
+
+pacf(log(course_1$Sales))
+
+autoplot(stl(ts(course_1$Sales, frequency=7), s.window = 7))
+
+adf.test(course_1$Sales, alternative = "stationary", k = 0) #it's a stationary series
+
+```
+
+
+```{r}
+
+#Deploying manual ARIMA model using ACF and PACF to identify appropriate p(aauto regressive), d(integration), q(moving average) values.
+
+(fit2 <- Arima(course_1$Sales, order=c(3,0,1), lambda = 0, xreg = as.matrix(course_1$Short_Promotion, course_1$User_Traffic)))
+
+
+df1 <- tibble(observed = course_1$Sales, predicted = as.numeric(fit2$fitted), time = course_1$Day_No) %>% 
+  mutate(abs_error = abs((observed - predicted)/observed*100))
+
+#Checking if autocorrelations are within the threshold limits and are behaving like white noise.
+checkresiduals(fit2)
+
+#Residual are a white noise here, which means autocorrelations are within the threshold limit.
+Box.test(fit2$residuals, lag = 1, type = "Ljung-Box", fitdf = 0)
+
+#Calculating error for this model
+rmsle_error <- rmsle(df1$observed, df1$predicted)
+rmsle_error
+
+
+
+```
+
+Model 4 - deploying auto ARIMA
+```{r}
+
+#Deploying auto arima to find the best model for predicting the sales
+
+arima.model <- auto.arima(course_1$Sales, xreg = cbind(course_1$User_Traffic, course_1$Short_Promotion), seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+
+#Storing the predicted, observed and error in a dataframe
+df <- tibble(observed = course_1$Sales, predicted = as.numeric(arima.model$fitted), time = course_1$Day_No) %>% 
+  mutate(abs_error = abs((observed - predicted)/observed*100))
+
+rmsle_error <- rmsle(df$observed, df$predicted)
+
+
+#plotting predicted vs observed
+ggplot(gather(df %>% select(-abs_error), obs_pred, value, -time), 
+       aes(x = time, y = value, col = obs_pred)) +
+  geom_line() +
+  xlab("") + ylab("") +
+  scale_color_manual(values=c("black", "hotpink")) +
+  theme_bw() + theme(legend.title = element_blank(),
+                     axis.text.x  = element_text(angle=45, vjust=0.5))
+
+
+```
+
+```{r}
+
+
+forecast.sales <- function (i){
+  course_i <- train %>% filter(Course_ID == i)
+  course_test <- test %>% filter(Course_ID == i)
+  ID <- as.vector(test %>% filter(Course_ID == i) %>% select("ID"))
+  
+  arima.model <- auto.arima(course_i$Sales, xreg = course_i$Short_Promotion, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+  
+  df <- tibble(observed = course_i$Sales, predicted = as.numeric(arima.model$fitted), time = course_i$Day_No) %>% 
+  mutate(abs_error = abs((observed - predicted)/observed*100))
+  
+  rmsle_error <- rmsle(df$observed, df$predicted)
+  
+  data_reg <- ts(course_test$Short_Promotion)
+  
+  forecast.course <- forecast(arima.model, xreg = data_reg, level = c(80,95))
+  
+  forecast.course2 <- forecast.course %>% as.data.frame() %>% mutate (rmsle_error)
+  
+  forecast.course2 <- cbind(forecast.course2, ID)  
+}
+
+c <- forecast.course1[FALSE,]
+
+for (x in seq(1,600)){
+
+forecast_db1 <- forecast.sales(x)
+forcast_blank_df <- rbind(forcast_blank_df, forecast_db1)
+}
+
+```
+
+```{r}
+forecast_blank_df1 <- forcast_blank_df %>% select("ID", "Point Forecast")
+
+names(forecast_blank_df1) <- c("ID", "Sales")
+
+write_csv(forecast_blank_df1, "/Users/shreyaagarwal/Library/Mobile Documents/com~apple~CloudDocs/Machine Learning Projects/sales_prediction/sales_forecast.csv")
+
+```
+
+Sales Forecasting Model explanation
+
+
+*Exploratory Analysis of the Dataset and key insights realized*
+  
+**The individual and total course sales of the company are seasonal in nature and have stayed constant in the given period. 
+Of the 600 courses, over 80% are from the Software marketing and the Development domain, while the rest of the courses belong to the – finance and Business. And hence, sales of the courses follow a similar ratio.  
+Of the five factors that may have potential impact on the sales – User traffic and short promotion could explain 75% of the change in value of sales, while long promotion, public holidays, and competition metric had a minimal impact.** 
+
+*Approach*
+
+The univariate series to be predicted here is sales for each course. The primary step was to analyze if the series was dependent on any of the given explanatory variables. The given five features were regressed against dependent variable, sales. The linear regression model revealed that short promotion and user traffic were significant features and could explain 75% of the variation in sales. 
+
+This linear regression model built to find relationships between variables was used to build the ARIMA model with 2 regressors initially. Eventually, user traffic was dropped as it was not available in the test dataset. 
+The auto ARIMA model was first built for course #1, the approach was to apply the model so built for the first course 1 to rest of the 599 courses. On the basis of the observation that overall sales and the individual course sales series was stationary, the same model was applied to all the 600 courses. 
+
+Here, another approach could have been to forecast for the overall sales for each day and proportionate the course sales from the forecasted total sales on the basis of the past proportions of each course sale in the total course. 
+
+*Data-preprocessing / Feature engineering*
+
+Time series can be run only when the following three factors are understood well. 1. How well we understand the factors that contribute to it; 2. how much data is available; 3. whether the forecasts can affect the thing we are trying to forecast. (Hyndman, R. and Athanasopoulos, G., 2018)
+
+In the sales series, we had data available for more than two years for each course, through regression modeling and correlation mapping, it was figured that two explanatory variables could significantly explain the variation and direction of sales – primarily user traffic and short promotion. 
+
+Correlation mapping noticeable positive correlation between sales and short promotion and user traffic, which meant that any increase in either of the two variables could reflect in increase in sales. So, the direction of the value of sales was understood.
+
+Here, a lagged difference of sales was also considered as an explanatory variable initially to increase the accuracy of prediction, however, it didn’t significantly explained the variation to the sales, also the presence of this variable also did not increase the accuracy of the model.
+
+*Final Model*
+
+Primarily three models were tested to predict the sales for each course – ARIMA, Auto ARIMA and Neural nets. 
+The predictions were made based on AUTO Arima as it showed the least Root Mean Squared Logarithmic Error (0.12) in comparison of the other two models. The model included short promotion as an exogenous variable, with seasonal factor turned to TRUE. The final ARIMA model included AR(2), I(0) and MA(1) terms, as was also observed with the ACF and PACF plots of the series. The residuals of the model so generated resembled white noise which is what is needed to make accurate predictions. 
+Cross-validation was not used here to test the efficiency of the model because cross-validation “can be applied to any model where the predictors are lagged values of the response variable” (Hyndman, R., 2016). In the current model, the explanatory variables are changing with sales each day, hence the model is trained on the entire training dataset. 
+The accuracy of the predictions is checked using RMSLE value. 
+
+
+*Interpretation of the final model*
+
+As mentioned earlier, the final model was forecasted with short promotion as the explanatory variable, although user traffic could explain a fair share of the variation in sales. This factor wasn’t available in the test dataset, which threw off the model while forecasting on the test set. Here, I’d like to mention that this is my first attempt at forecasting, and hence my limited understanding, could have resulted in dropping this very significant variable.  
+Features like competition metric, long promotion and public holidays did not add much to the model and didn’t explain the variation in sales much, hence they were not considered in the final model. 
+
+References 
+1.	Hyndman, R. and Athanasopoulos, G., 2018. Forecasting. [Melbourne]: O Texts, online open-access textbooks.
+
+
+
+```
+
