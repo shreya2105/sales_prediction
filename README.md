@@ -1,5 +1,5 @@
 # sales_prediction
-This project was part of hackathon organized by Analytics Vidhya. The purpose here was to predict sales of 600 courses 
+This project was part of a hackathon organized by Analytics Vidhya. The purpose here was to predict sales of 600 courses 
 of an online teaching portal.
 
 Here's the descriptive explanation of the data and the model hence built to predict the sales.
